@@ -248,13 +248,25 @@ export async function loadFromUrl(
     result = await attempt(true);
   }
 
-  let bytes = 0;
-  try {
-    const head = await fetch(proxied(url), { method: "HEAD" });
-    bytes = Number(head.headers.get("content-length") ?? 0);
-  } catch {
-    bytes = 0;
-  }
+  return { ...result, bytes: await probeSize(url) };
+}
 
-  return { ...result, bytes };
+/**
+ * Reports a remote model's size. Edge networks compress responses and drop
+ * `content-length`, so ask for a single byte and read the total back out of
+ * `content-range`, falling back to a plain HEAD.
+ */
+async function probeSize(url: string): Promise<number> {
+  try {
+    const ranged = await fetch(proxied(url), {
+      headers: { Range: "bytes=0-0" },
+    });
+    const total = ranged.headers.get("content-range")?.split("/")[1];
+    if (total && Number(total) > 0) return Number(total);
+
+    const head = await fetch(proxied(url), { method: "HEAD" });
+    return Number(head.headers.get("content-length") ?? 0);
+  } catch {
+    return 0;
+  }
 }
