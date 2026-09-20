@@ -228,7 +228,11 @@ export default function ModelViewer() {
 
   const reset = () => {
     loadTokenRef.current++;
+    // The engine owns the scene, so clearing React state alone would leave the
+    // old model rendering behind the empty-state overlay.
+    viewerRef.current?.clear();
     setLoaded(null);
+    setActiveClip(null);
     setStatus({ phase: "empty" });
     router.push("/");
   };

@@ -64,8 +64,12 @@ export class Viewer {
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     pmrem.dispose();
+    // The environment map already supplies full ambient illumination. The
+    // lights below only shape it, so they stay low — a full-strength sun on
+    // top of the IBL washes saturated albedo out to pastel.
+    this.scene.environmentIntensity = 0.85;
 
-    this.keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
+    this.keyLight = new THREE.DirectionalLight(0xffffff, 1.7);
     this.keyLight.position.set(4, 7, 5);
     this.keyLight.castShadow = true;
     this.keyLight.shadow.mapSize.set(2048, 2048);
@@ -79,9 +83,9 @@ export class Viewer {
     shadowCamera.top = 5;
     shadowCamera.bottom = -5;
     this.scene.add(this.keyLight);
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.08));
 
-    const rim = new THREE.DirectionalLight(0x93b6ff, 0.8);
+    const rim = new THREE.DirectionalLight(0x93b6ff, 0.35);
     rim.position.set(-5, 2, -4);
     this.scene.add(rim);
 
@@ -138,6 +142,19 @@ export class Viewer {
 
     const root = new THREE.Group();
     root.add(object);
+
+    // Exports from Blender and most DCC tools embed their render lights via
+    // KHR_lights_punctual. Those intensities are tuned to the model's authored
+    // scale, so once we normalise the model they overpower it — a point light
+    // metres away from a 15 m gate sits centimetres from a 2 m one, and inverse
+    // square does the rest. The viewer lights every model with its own rig, so
+    // the model's own lights are dropped.
+    const embeddedLights: THREE.Object3D[] = [];
+    object.traverse((child) => {
+      if ((child as THREE.Light).isLight) embeddedLights.push(child);
+    });
+    for (const light of embeddedLights) light.removeFromParent();
+
     normalize(object, 2);
 
     object.traverse((child) => {
@@ -170,6 +187,11 @@ export class Viewer {
     return this.model.actions.length;
   }
 
+  /** Removes the current model so the viewport returns to the empty state. */
+  clear() {
+    this.clearModel();
+  }
+
   private clearModel() {
     if (!this.model) return;
     this.model.mixer?.stopAllAction();
@@ -181,7 +203,7 @@ export class Viewer {
   resetView() {
     const radius = this.model?.radius ?? 1.5;
     const fov = (this.camera.fov * Math.PI) / 180;
-    const distance = (radius / Math.sin(fov / 2)) * 1.25;
+    const distance = (radius / Math.sin(fov / 2)) * 1.12;
     this.camera.position.set(distance * 0.55, distance * 0.42, distance * 0.78);
     this.camera.near = Math.max(distance / 500, 0.01);
     this.camera.far = distance * 40;

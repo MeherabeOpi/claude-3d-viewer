@@ -4,6 +4,10 @@ const KHRONOS =
 /** Public, CORS-enabled models so a first-time visitor sees something instantly. */
 export const SAMPLES = [
   {
+    label: "Chinese New Year gate",
+    url: "/models/chinese-new-year-gate.glb",
+  },
+  {
     label: "Damaged helmet",
     url: `${KHRONOS}/DamagedHelmet/glTF-Binary/DamagedHelmet.glb`,
   },

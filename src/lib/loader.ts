@@ -257,14 +257,23 @@ export async function loadFromUrl(
  * `content-range`, falling back to a plain HEAD.
  */
 async function probeSize(url: string): Promise<number> {
-  try {
-    const ranged = await fetch(proxied(url), {
-      headers: { Range: "bytes=0-0" },
-    });
-    const total = ranged.headers.get("content-range")?.split("/")[1];
-    if (total && Number(total) > 0) return Number(total);
+  // Same-origin models are fetched directly; the proxy only takes absolute
+  // remote URLs and would answer a relative path with a 400 whose body length
+  // would then be reported as the model size.
+  const sameOrigin =
+    url.startsWith("/") ||
+    (typeof window !== "undefined" && url.startsWith(window.location.origin));
+  const target = sameOrigin ? url : proxied(url);
 
-    const head = await fetch(proxied(url), { method: "HEAD" });
+  try {
+    const ranged = await fetch(target, { headers: { Range: "bytes=0-0" } });
+    if (ranged.ok || ranged.status === 206) {
+      const total = ranged.headers.get("content-range")?.split("/")[1];
+      if (total && Number(total) > 0) return Number(total);
+    }
+
+    const head = await fetch(target, { method: "HEAD" });
+    if (!head.ok) return 0;
     return Number(head.headers.get("content-length") ?? 0);
   } catch {
     return 0;
