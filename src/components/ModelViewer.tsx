@@ -21,12 +21,26 @@ import {
   formatCount,
 } from "@/lib/formats";
 import { SAMPLES } from "@/lib/samples";
+import { packForSharing, uploadModel } from "@/lib/pack";
 
 type Status =
   | { phase: "empty" }
   | { phase: "loading"; note: string; ratio: number }
   | { phase: "ready" }
   | { phase: "error"; message: string };
+
+type Sharing =
+  | { phase: "idle" }
+  | { phase: "packing" }
+  | { phase: "uploading"; percentage: number }
+  | { phase: "error"; message: string };
+
+/** What the current model was built from, kept so it can be packed to share. */
+type Source = {
+  files: File[] | null;
+  object: THREE.Object3D;
+  animations: THREE.AnimationClip[];
+};
 
 type Loaded = {
   name: string;
@@ -45,12 +59,15 @@ export default function ModelViewer() {
   const viewerRef = useRef<Viewer | null>(null);
   const urlInputRef = useRef<HTMLInputElement>(null);
   const loadTokenRef = useRef(0);
+  const sourceRef = useRef<Source | null>(null);
 
   const [status, setStatus] = useState<Status>({ phase: "empty" });
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [dragging, setDragging] = useState(false);
   const [panelOpen, setPanelOpen] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [sharing, setSharing] = useState<Sharing>({ phase: "idle" });
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const [autoRotate, setAutoRotate] = useState(true);
   const [wireframe, setWireframe] = useState(false);
@@ -87,11 +104,14 @@ export default function ModelViewer() {
       name: string,
       bytes: number,
       shareUrl: string | null,
+      files: File[] | null,
     ) => {
       const viewer = viewerRef.current;
       if (!viewer) return;
       viewer.setModel(object, animations);
       viewer.setBackdrop(backdrop);
+      sourceRef.current = { files, object, animations };
+      setSharing({ phase: "idle" });
       setLoaded({
         name,
         stats: inspect(object),
@@ -118,7 +138,14 @@ export default function ModelViewer() {
         if (token !== loadTokenRef.current) return;
         const share = new URL(window.location.href);
         share.searchParams.set("src", url);
-        present(result.object, result.animations, baseName(url), result.bytes, share.toString());
+        present(
+          result.object,
+          result.animations,
+          baseName(url),
+          result.bytes,
+          share.toString(),
+          null,
+        );
       } catch (error) {
         if (token !== loadTokenRef.current) return;
         setStatus({
@@ -151,7 +178,7 @@ export default function ModelViewer() {
               f.name.split(".").pop()?.toLowerCase() ?? "",
             ),
           ) ?? files[0];
-        present(result.object, result.animations, root.name, result.bytes, null);
+        present(result.object, result.animations, root.name, result.bytes, null, files);
       } catch (error) {
         if (token !== loadTokenRef.current) return;
         setStatus({
@@ -206,14 +233,63 @@ export default function ModelViewer() {
     if (value === srcParam) void openUrl(value);
   };
 
-  const share = async () => {
-    if (!loaded?.shareUrl) return;
+  const copyLink = async (link: string) => {
     try {
-      await navigator.clipboard.writeText(loaded.shareUrl);
+      await navigator.clipboard.writeText(link);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setCopyFailed(false);
+      setTimeout(() => setCopied(false), 2200);
     } catch {
-      window.prompt("Copy this link:", loaded.shareUrl);
+      // Some browsers refuse clipboard writes without a trusted gesture. The
+      // link is rendered in the panel, so point at it rather than opening a
+      // blocking prompt over the page.
+      setCopyFailed(true);
+    }
+  };
+
+  /**
+   * A model already loaded from a URL has a link the recipient can fetch, so
+   * it just gets copied. A model opened from disk has no such URL, so it is
+   * packed into a single glTF and uploaded first — that upload is what makes
+   * the link openable by anyone.
+   */
+  const share = async () => {
+    if (loaded?.shareUrl) {
+      await copyLink(loaded.shareUrl);
+      return;
+    }
+
+    const source = sourceRef.current;
+    if (!source) return;
+
+    try {
+      setSharing({ phase: "packing" });
+      const packed = await packForSharing(
+        source.files,
+        source.object,
+        source.animations,
+      );
+
+      setSharing({ phase: "uploading", percentage: 0 });
+      const blobUrl = await uploadModel(packed, (percentage) =>
+        setSharing({ phase: "uploading", percentage }),
+      );
+
+      const link = new URL(window.location.href);
+      link.searchParams.set("src", blobUrl);
+      const shareUrl = link.toString();
+
+      setSharing({ phase: "idle" });
+      setLoaded((prev) => (prev ? { ...prev, shareUrl } : prev));
+      await copyLink(shareUrl);
+    } catch (error) {
+      setSharing({
+        phase: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "That model could not be uploaded.",
+      });
     }
   };
 
@@ -243,6 +319,18 @@ export default function ModelViewer() {
   }, [backdrop]);
 
   const dim = loaded?.stats.size;
+  const busySharing =
+    sharing.phase === "packing" || sharing.phase === "uploading";
+  const shareLabel =
+    sharing.phase === "packing"
+      ? "Packing model…"
+      : sharing.phase === "uploading"
+        ? `Uploading ${Math.round(sharing.percentage)}%`
+        : copied
+          ? "Link copied"
+          : loaded?.shareUrl
+            ? "Copy share link"
+            : "Upload & copy link";
 
   return (
     <div
@@ -319,9 +407,10 @@ export default function ModelViewer() {
               View any 3D model in your browser
             </h1>
             <p className="mt-2 text-sm leading-relaxed text-slate-300">
-              Drop a file anywhere on this page, or paste a link above. Nothing is
-              uploaded — local files are rendered entirely on your device. Load a
-              model by link and the page URL becomes a share link anyone can open.
+              Drop a file anywhere on this page, or paste a link above. Viewing
+              happens entirely on your device. When you want to send a model on,
+              one click uploads it and copies a link your recipient can open —
+              they just click it, and the model loads.
             </p>
 
             <div className="mt-5 flex flex-wrap justify-center gap-2">
@@ -496,15 +585,15 @@ export default function ModelViewer() {
           <div className="mt-4 flex gap-2">
             <button
               onClick={share}
-              disabled={!loaded.shareUrl}
+              disabled={busySharing}
               title={
                 loaded.shareUrl
                   ? "Copy a link that opens this model"
-                  : "Local files stay on your device, so they have no share link. Load by URL to share."
+                  : "Uploads this model and copies a link anyone can open"
               }
-              className="flex-1 rounded-xl bg-sky-500/90 px-3 py-2 text-xs font-semibold text-white transition enabled:hover:bg-sky-400 disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-400"
+              className="flex-1 rounded-xl bg-sky-500/90 px-3 py-2 text-xs font-semibold text-white transition enabled:hover:bg-sky-400 disabled:cursor-not-allowed disabled:bg-sky-500/40"
             >
-              {copied ? "Link copied" : "Copy share link"}
+              {shareLabel}
             </button>
             <button
               onClick={download}
@@ -513,6 +602,41 @@ export default function ModelViewer() {
               PNG
             </button>
           </div>
+
+          {sharing.phase === "uploading" && (
+            <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-white/15">
+              <div
+                className="h-full rounded-full bg-sky-400 transition-[width] duration-150"
+                style={{ width: `${Math.max(4, sharing.percentage)}%` }}
+              />
+            </div>
+          )}
+
+          {sharing.phase === "error" && (
+            <p className="mt-2 text-[11px] leading-relaxed text-red-300">
+              {sharing.message}
+            </p>
+          )}
+
+          {loaded.shareUrl ? (
+            <div className="mt-2">
+              {copyFailed && (
+                <p className="mb-1 text-[11px] text-amber-300">
+                  Clipboard blocked — select and copy the link below.
+                </p>
+              )}
+              <p className="break-all text-[11px] leading-relaxed text-slate-400 select-all">
+                {loaded.shareUrl}
+              </p>
+            </div>
+          ) : (
+            sharing.phase === "idle" && (
+              <p className="mt-2 text-[11px] leading-relaxed text-slate-400">
+                Sharing uploads this model to a public link — anyone with it can
+                view and download the model.
+              </p>
+            )
+          )}
         </aside>
       )}
 
